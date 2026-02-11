@@ -21,7 +21,7 @@ namespace DocumentDispatchService.Migrations
                     Status = table.Column<int>(type: "integer", nullable: false),
                     RetryCount = table.Column<int>(type: "integer", nullable: false),
                     CreatedAtUtc = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
-                    UpdateAtUtc = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
+                    UpdatedAtUtc = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
                     LastError = table.Column<string>(type: "text", nullable: true)
                 },
                 constraints: table =>

@@ -1,52 +1,72 @@
 ﻿using DocumentDispatchService.Contracts;
+using DocumentDispatchService.Data;
 using DocumentDispatchService.Models;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
 namespace DocumentDispatchService.Controllers
 {
-
     [ApiController]
-    [Route("dispatch")]
-    public class DispatchController : ControllerBase
+    [Route("api/[controller]")]
+    public sealed class DispatchController : ControllerBase
     {
-        // In-memory store for now;  I'll replace with EF Core next
-        private static readonly List<DispatchRequest> Store = new();
+        private readonly DispatchDbContext _db;
 
-        [HttpGet]
-        public ActionResult<List<DispatchRequest>> GetAll()
+        public DispatchController(DispatchDbContext db)
         {
-            return Ok(Store.OrderByDescending(x => x.CreatedAtUtc).ToList());
+            _db = db;
         }
 
-        [HttpGet("{id:guid}")]
-        public ActionResult<DispatchRequest> GetOne(Guid id)
-        {
-            var item = Store.FirstOrDefault(x => x.Id == id);
-            return item is null ? NotFound() : Ok(item);
-        }
-
+        // POST: api/dispatch
         [HttpPost]
-        public ActionResult<DispatchRequest> Create([FromBody] CreateDispatchRequest body)
+        public async Task<ActionResult<DispatchRequest>> Create([FromBody] CreateDispatchRequest request, CancellationToken ct)
         {
-            if (string.IsNullOrWhiteSpace(body.RecipientEmail))
-                return BadRequest("RecipientEmail is requered.");
+            if (string.IsNullOrWhiteSpace(request.RecipientEmail))
+                return BadRequest("RecipientEmail is required.");
 
-            if (string.IsNullOrWhiteSpace(body.DocumentName))
+            if (string.IsNullOrWhiteSpace(request.DocumentName))
                 return BadRequest("DocumentName is required.");
 
-            var req = new DispatchRequest
+            var now = DateTime.UtcNow;
+
+            var entity = new DispatchRequest
             {
-                RecipientEmail = body.RecipientEmail.Trim(),
-                DocumentName = body.DocumentName.Trim(),
+                RecipientEmail = request.RecipientEmail.Trim(),
+                DocumentName = request.DocumentName.Trim(),
                 Status = DispatchStatus.Pending,
                 RetryCount = 0,
-                CreatedAtUtc = DateTime.UtcNow,
-                UpdateAtUtc = DateTime.UtcNow
+                LastError = null,
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
             };
 
-            Store.Add(req);
+            _db.DispatchRequests.Add(entity);
+            await _db.SaveChangesAsync(ct);
 
-            return CreatedAtAction(nameof(GetOne), new { id = req.Id }, req);
+            return CreatedAtAction(nameof(GetById), new { id = entity.Id }, entity);
+        }
+
+        // GET: api/dispatch/{id}
+        [HttpGet("{id:guid}")]
+        public async Task<ActionResult<DispatchRequest>> GetById(Guid id, CancellationToken ct)
+        {
+            var entity = await _db.DispatchRequests.FirstOrDefaultAsync(x => x.Id == id, ct);
+            if (entity is null)
+                return NotFound();
+
+            return Ok(entity);
+        }
+
+        // GET: api/dispatch
+        [HttpGet]
+        public async Task<ActionResult<List<DispatchRequest>>> List(CancellationToken ct)
+        {
+            var items = await _db.DispatchRequests
+                .OrderByDescending(x => x.CreatedAtUtc)
+                .Take(100)
+                .ToListAsync(ct);
+
+            return Ok(items);
         }
     }
 }
