@@ -21,11 +21,6 @@ namespace DocumentDispatchService.Controllers
         [HttpPost]
         public async Task<ActionResult<DispatchRequest>> Create([FromBody] CreateDispatchRequest request, CancellationToken ct)
         {
-            if (string.IsNullOrWhiteSpace(request.RecipientEmail))
-                return BadRequest("RecipientEmail is required.");
-
-            if (string.IsNullOrWhiteSpace(request.DocumentName))
-                return BadRequest("DocumentName is required.");
 
             var now = DateTime.UtcNow;
 
