@@ -12,7 +12,7 @@
         public int RetryCount { get; set; } = 0;
 
         public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
-        public DateTime UpdateAtUtc { get; set; } = DateTime.UtcNow;
+        public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;
 
         public string? LastError { get; set; }
     }
