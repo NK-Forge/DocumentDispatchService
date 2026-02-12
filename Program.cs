@@ -1,3 +1,4 @@
+using DocumentDispatchService.Background;
 using DocumentDispatchService.Data;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json.Serialization;
@@ -7,7 +8,7 @@ var builder = WebApplication.CreateBuilder(args);
 // Controllers
 builder.Services.AddControllers();
 
-// Swagger (Swashbuckle)
+// Swagger
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
@@ -19,6 +20,8 @@ builder.Services
     .AddJsonOptions(options =>
         options.JsonSerializerOptions.Converters
         .Add(new JsonStringEnumConverter()));
+
+builder.Services.AddHostedService<DispatchWorker>();
 
 var app = builder.Build();
 
