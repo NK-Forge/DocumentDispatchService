@@ -1,6 +1,7 @@
 ﻿using DocumentDispatchService.Data;
 using DocumentDispatchService.Models;
 using Microsoft.EntityFrameworkCore;
+using System.Linq.Expressions;
 
 namespace DocumentDispatchService.Background
 {
@@ -8,17 +9,21 @@ namespace DocumentDispatchService.Background
     {
         private readonly IServiceScopeFactory _scopeFactory;
         private readonly ILogger<DispatchWorker> _logger;
-        private readonly Random _random = new();
+        private readonly IConfiguration _config;
 
-        public DispatchWorker(IServiceScopeFactory scopeFactory, ILogger<DispatchWorker> logger)
+        private readonly Random _random = new();
+        private readonly string _ownerId = $"{Environment.MachineName}:{Guid.NewGuid():N}";
+
+        public DispatchWorker(IServiceScopeFactory scopeFactory, ILogger<DispatchWorker> logger, IConfiguration config)
         {
             _scopeFactory = scopeFactory;
             _logger = logger;
+            _config = config;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            _logger.LogInformation("DispatchWorker started.");
+            _logger.LogInformation("DispatchWorker started. Owner={OwnerId}", _ownerId);
 
             while (!stoppingToken.IsCancellationRequested)
             {
@@ -35,58 +40,102 @@ namespace DocumentDispatchService.Background
                     _logger.LogError(ex, "Unhandled error in DispatchWorker loop.");
                 }
 
+                var pollSeconds = GetInt("DispatchWorker:PollSeconds", 5);
                 await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
             }
 
-            _logger.LogInformation("DispatchWorker stopping.");
+            _logger.LogInformation("DispatchWorker stopping. Owner={OwnerId}", _ownerId);
         }
 
         private async Task TickAsync(CancellationToken ct)
         {
+            var batchSize = GetInt("DispatchWorker:BatchSize", 5);
+            var leaseSeconds = GetInt("DispatchWorker:LeaseSeconds", 30);
+
             using var scope = _scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<DispatchDbContext>();
 
-            var pending = await db.DispatchRequests
-                .Where(x => x.Status == DispatchStatus.Pending)
+            var now = DateTime.UtcNow;
+            var leaseUntil = now.AddSeconds(leaseSeconds);
+
+            var candidates = await db.DispatchRequests
+                .Where(x =>
+                    x.Status == DispatchStatus.Pending &&
+                    (x.LockedUntilUtc == null || x.LockedUntilUtc < now))
                 .OrderBy(x => x.CreatedAtUtc)
-                .Take(5)
+                .Take(batchSize)
+                .Select(x => x.Id)
                 .ToListAsync(ct);
 
-            if (pending.Count == 0)
+            if (candidates.Count == 0)
             {
                 return;
             }
 
-            var now = DateTime.UtcNow;
+            var claimed = new List<Guid>();
 
-            foreach (var dispatch in pending)
+            // Claim each job using an atomic update:
+            // Only succeeds if it's still Pending and lease is still available.
+            foreach (var id in candidates)
             {
-                dispatch.Status = DispatchStatus.Processing;
-                dispatch.UpdatedAtUtc = now;
+                var rows = await db.DispatchRequests
+                    .Where(x =>
+                        x.Id == id &&
+                        x.Status == DispatchStatus.Pending &&
+                        (x.LockedUntilUtc == null || x.LockedUntilUtc < now))
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(x => x.LockOwner, _ownerId)
+                        .SetProperty(x => x.LockedUntilUtc, leaseUntil)
+                        .SetProperty(x => x.Status, DispatchStatus.Processing)
+                        .SetProperty(x => x.UpdatedAtUtc, now),
+                        ct);
+
+                if (rows == 1)
+                {
+                    claimed.Add(id);
+
+                    _logger.LogInformation("CLAIMED dispatch {DispatchId} by {OwnerId}", id, _ownerId);
+                }
             }
 
-            await db.SaveChangesAsync(ct);
-
-            foreach (var dispatch in pending)
+            if (claimed.Count == 0)
             {
-                await ProcessOneAsync(dispatch.Id, ct);
+                return;
+            }
+
+            _logger.LogInformation("Claimed {Count} dispatch(es). Owner={OwnerId}", claimed.Count, _ownerId);
+
+            // Process claimed jobs
+
+        foreach (var id in claimed)
+            {
+                await ProcessOneAsync(id, ct);
             }
         }
 
         private async Task ProcessOneAsync(Guid dispatchId, CancellationToken ct)
         {
+            var workSeconds = GetInt("DispatchWorker:WorkSeconds", 2);
+
             using var scope = _scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<DispatchDbContext>();
 
-            var dispatch = await db.DispatchRequests.FirstOrDefaultAsync(x => x.Id == dispatchId, ct);
+            // Ensure we still own the lease and it's not expired
+            var now = DateTime.UtcNow;
+
+            var dispatch = await db.DispatchRequests.FirstOrDefaultAsync(
+                x => x.Id == dispatchId && x.LockOwner == _ownerId && x.LockedUntilUtc != null && x.LockedUntilUtc >= now,
+                ct);
+
             if (dispatch is null)
             {
+                _logger.LogWarning("Lost lease for dispatch {DispatchId}. Owner={OwnerId}", dispatchId, _ownerId);
                 return;
             }
 
             _logger.LogInformation("Processing dispatch {DispatchId}", dispatch.Id);
 
-            await Task.Delay(TimeSpan.FromSeconds(2), ct);
+            await Task.Delay(TimeSpan.FromSeconds(workSeconds), ct);
 
             var success = _random.NextDouble() > 0.2;
 
@@ -111,6 +160,9 @@ namespace DocumentDispatchService.Background
                 }
             }
 
+            // Release the lease
+            dispatch.LockOwner = null;
+            dispatch.LockedUntilUtc = null;
             dispatch.UpdatedAtUtc = DateTime.UtcNow;
 
             await db.SaveChangesAsync(ct);
@@ -121,6 +173,12 @@ namespace DocumentDispatchService.Background
                 dispatch.Status,
                 dispatch.RetryCount
             );
+        }
+
+        private int GetInt(string key, int defaultValue)
+        {
+            var value = _config[key];
+            return int.TryParse(value, out var result) ? result : defaultValue;
         }
     }
 }
