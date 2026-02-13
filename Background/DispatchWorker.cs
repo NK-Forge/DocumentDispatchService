@@ -1,7 +1,8 @@
-﻿// Background/DispatchWorker.cs
-using DocumentDispatchService.Data;
+﻿using DocumentDispatchService.Data;
 using DocumentDispatchService.Models;
+using DocumentDispatchService.Observability;
 using Microsoft.EntityFrameworkCore;
+using Prometheus;
 
 namespace DocumentDispatchService.Background
 {
@@ -37,6 +38,7 @@ namespace DocumentDispatchService.Background
                 }
                 catch (Exception ex)
                 {
+                    DispatchMetrics.DispatchErrorsTotal.WithLabels("tick").Inc();
                     _logger.LogError(ex, "Unhandled error in DispatchWorker loop.");
                 }
 
@@ -51,6 +53,7 @@ namespace DocumentDispatchService.Background
         {
             var batchSize = GetInt("DispatchWorker:BatchSize", 5);
             var leaseSeconds = GetInt("DispatchWorker:LeaseSeconds", 30);
+            var maxConcurrency = Math.Max(1, GetInt("DispatchWorker:MaxConcurrency", 2));
 
             using var scope = _scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<DispatchDbContext>();
@@ -74,8 +77,6 @@ namespace DocumentDispatchService.Background
 
             var claimed = new List<Guid>();
 
-            // Claim each job using an atomic update:
-            // Only succeeds if it's still Pending and lease is still available.
             foreach (var id in candidates)
             {
                 var rows = await db.DispatchRequests
@@ -93,6 +94,7 @@ namespace DocumentDispatchService.Background
                 if (rows == 1)
                 {
                     claimed.Add(id);
+                    DispatchMetrics.DispatchClaimedTotal.Inc();
                     _logger.LogInformation("CLAIMED dispatch {DispatchId} by {OwnerId}", id, _ownerId);
                 }
             }
@@ -102,13 +104,42 @@ namespace DocumentDispatchService.Background
                 return;
             }
 
-            _logger.LogInformation("Claimed {Count} dispatch(es). Owner={OwnerId}", claimed.Count, _ownerId);
+            _logger.LogInformation(
+                "Claimed {Count} dispatch(es). Owner={OwnerId}. MaxConcurrency={MaxConcurrency}",
+                claimed.Count,
+                _ownerId,
+                maxConcurrency);
 
-            // Process claimed jobs (still sequential for now; concurrency comes later in 5C)
+            using var gate = new SemaphoreSlim(maxConcurrency, maxConcurrency);
+            var tasks = new List<Task>(claimed.Count);
+
             foreach (var id in claimed)
             {
-                await ProcessOneAsync(id, ct);
+                await gate.WaitAsync(ct);
+
+                tasks.Add(Task.Run(async () =>
+                {
+                    try
+                    {
+                        await ProcessOneAsync(id, ct);
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        // shutdown
+                    }
+                    catch (Exception ex)
+                    {
+                        DispatchMetrics.DispatchErrorsTotal.WithLabels("process").Inc();
+                        _logger.LogError(ex, "Unhandled exception while processing dispatch {DispatchId}", id);
+                    }
+                    finally
+                    {
+                        gate.Release();
+                    }
+                }, CancellationToken.None));
             }
+
+            await Task.WhenAll(tasks);
         }
 
         private async Task ProcessOneAsync(Guid dispatchId, CancellationToken ct)
@@ -116,7 +147,6 @@ namespace DocumentDispatchService.Background
             var workSeconds = GetInt("DispatchWorker:WorkSeconds", 2);
             var leaseSeconds = GetInt("DispatchWorker:LeaseSeconds", 30);
 
-            // Renew at 1/3 lease by default (configurable)
             var defaultRenew = Math.Max(1, leaseSeconds / 3);
             var renewEverySeconds = Math.Max(1, GetInt("DispatchWorker:LeaseRenewEverySeconds", defaultRenew));
 
@@ -125,7 +155,6 @@ namespace DocumentDispatchService.Background
 
             var now = DateTime.UtcNow;
 
-            // Ensure we still own the lease and it's not expired
             var dispatch = await db.DispatchRequests.FirstOrDefaultAsync(
                 x => x.Id == dispatchId &&
                      x.LockOwner == _ownerId &&
@@ -136,6 +165,7 @@ namespace DocumentDispatchService.Background
 
             if (dispatch is null)
             {
+                DispatchMetrics.DispatchProcessedTotal.WithLabels("lease_lost").Inc();
                 _logger.LogWarning("Lost lease for dispatch {DispatchId}. Owner={OwnerId}", dispatchId, _ownerId);
                 return;
             }
@@ -146,16 +176,20 @@ namespace DocumentDispatchService.Background
                 ["OwnerId"] = _ownerId
             });
 
+            DispatchMetrics.DispatchInflight.Inc();
+            using var timer = DispatchMetrics.DispatchProcessingDurationSeconds.NewTimer();
+
             _logger.LogInformation("Processing dispatch.");
 
             using var renewCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            var renewTask = Task.Run(
-                () => LeaseRenewalLoopAsync(dispatchId, leaseSeconds, renewEverySeconds, renewCts.Token),
-                CancellationToken.None);
+
+            // Lease renewal loop returns:
+            // - true  => renewal OK (or cancelled because work finished)
+            // - false => lost lease during work
+            var renewTask = LeaseRenewalLoopAsync(dispatchId, leaseSeconds, renewEverySeconds, renewCts.Token);
 
             try
             {
-                // Simulated work, but we keep it responsive to lease-loss.
                 var total = TimeSpan.FromSeconds(workSeconds);
                 var chunk = TimeSpan.FromSeconds(1);
 
@@ -168,10 +202,16 @@ namespace DocumentDispatchService.Background
                     var completed = await Task.WhenAny(Task.Delay(step, ct), renewTask);
                     if (completed == renewTask)
                     {
-                        // Renewal loop ended early: either lost lease or faulted.
-                        await ObserveRenewalOutcomeAsync(renewTask);
-                        _logger.LogWarning("Stopping processing because lease renewal ended.");
-                        return;
+                        var ok = await renewTask;
+                        if (!ok)
+                        {
+                            DispatchMetrics.DispatchProcessedTotal.WithLabels("lease_lost").Inc();
+                            _logger.LogWarning("Stopping processing because lease renewal reported lost lease.");
+                            return;
+                        }
+
+                        // If renewal task ended "ok", it likely means cancellation happened.
+                        // We should not stop processing in that case; but it should only cancel on shutdown.
                     }
 
                     elapsed += step;
@@ -183,6 +223,7 @@ namespace DocumentDispatchService.Background
                 {
                     dispatch.Status = DispatchStatus.Completed;
                     dispatch.LastError = null;
+                    DispatchMetrics.DispatchProcessedTotal.WithLabels("completed").Inc();
                 }
                 else
                 {
@@ -192,15 +233,16 @@ namespace DocumentDispatchService.Background
                     {
                         dispatch.Status = DispatchStatus.Failed;
                         dispatch.LastError = "Simulated delivery failure after 3 attempts.";
+                        DispatchMetrics.DispatchProcessedTotal.WithLabels("failed").Inc();
                     }
                     else
                     {
                         dispatch.Status = DispatchStatus.Pending;
                         dispatch.LastError = "Simulated transient failure.";
+                        DispatchMetrics.DispatchProcessedTotal.WithLabels("requeued").Inc();
                     }
                 }
 
-                // Release the lease
                 dispatch.LockOwner = null;
                 dispatch.LockedUntilUtc = null;
                 dispatch.UpdatedAtUtc = DateTime.UtcNow;
@@ -214,21 +256,23 @@ namespace DocumentDispatchService.Background
             }
             finally
             {
-                // Stop renewal loop
+                DispatchMetrics.DispatchInflight.Dec();
+
                 renewCts.Cancel();
 
                 try
                 {
+                    // Renew task should exit cleanly on cancel.
                     await renewTask;
                 }
                 catch
                 {
-                    // Observed via ObserveRenewalOutcomeAsync or logged inside loop.
+                    // ignore
                 }
             }
         }
 
-        private async Task LeaseRenewalLoopAsync(Guid dispatchId, int leaseSeconds, int renewEverySeconds, CancellationToken token)
+        private async Task<bool> LeaseRenewalLoopAsync(Guid dispatchId, int leaseSeconds, int renewEverySeconds, CancellationToken token)
         {
             while (!token.IsCancellationRequested)
             {
@@ -238,7 +282,7 @@ namespace DocumentDispatchService.Background
                 }
                 catch (OperationCanceledException)
                 {
-                    return;
+                    return true;
                 }
 
                 using var scope = _scopeFactory.CreateScope();
@@ -247,12 +291,16 @@ namespace DocumentDispatchService.Background
                 var ok = await TryRenewLeaseAsync(db, dispatchId, leaseSeconds, token);
                 if (!ok)
                 {
+                    DispatchMetrics.DispatchErrorsTotal.WithLabels("renew").Inc();
                     _logger.LogWarning("Lease renewal failed (lost lease).");
-                    throw new InvalidOperationException("Lost lease during processing.");
+                    return false;
                 }
 
+                DispatchMetrics.DispatchLeaseRenewedTotal.Inc();
                 _logger.LogDebug("Lease renewed.");
             }
+
+            return true;
         }
 
         private async Task<bool> TryRenewLeaseAsync(DispatchDbContext db, Guid dispatchId, int leaseSeconds, CancellationToken ct)
@@ -273,18 +321,6 @@ namespace DocumentDispatchService.Background
                     ct);
 
             return rows == 1;
-        }
-
-        private static async Task ObserveRenewalOutcomeAsync(Task renewTask)
-        {
-            try
-            {
-                await renewTask;
-            }
-            catch
-            {
-                // Caller will log and stop processing.
-            }
         }
 
         private int GetInt(string key, int defaultValue)

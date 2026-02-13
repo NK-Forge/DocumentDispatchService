@@ -2,6 +2,7 @@ using DocumentDispatchService.Background;
 using DocumentDispatchService.Data;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json.Serialization;
+using Prometheus;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -25,12 +26,18 @@ builder.Services.AddHostedService<DispatchWorker>();
 
 var app = builder.Build();
 
-app.UseHttpsRedirection();
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
 
-// Enable Swagger (dev-friendly; fine for now)
-app.UseSwagger();
-app.UseSwaggerUI();
+// Prometheus: basic request metrics (HTTP count + duration)
+app.UseHttpMetrics();
 
 app.MapControllers();
+
+// Prometheus scrape endpoint
+app.MapMetrics("/metrics");
 
 app.Run();
