@@ -69,3 +69,4 @@ jobs:
           files: ${{ env.ZIP_NAME }}
           body_path: release/README.md
           generate_release_notes: false
+          fail_on_unmatched_files: true
