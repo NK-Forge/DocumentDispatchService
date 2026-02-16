@@ -1,11 +1,11 @@
-version: "3.9"
-
 services:
   api:
-    build: .
+    image: ghcr.io/nk-forge/documentdispatchservice:v1.0.0
     container_name: document_dispatch_api
+    restart: unless-stopped
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     ports:
       - "8080:8080"
     environment:
@@ -24,6 +24,11 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} -h localhost"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
 volumes:
   postgres_data:
