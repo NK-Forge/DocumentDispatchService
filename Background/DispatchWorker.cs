@@ -2,6 +2,8 @@
 using DocumentDispatchService.Models;
 using DocumentDispatchService.Observability;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using static DocumentDispatchService.Observability.DispactchLogEvents;
 using Prometheus;
 
 namespace DocumentDispatchService.Background
@@ -24,7 +26,7 @@ namespace DocumentDispatchService.Background
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            _logger.LogInformation("DispatchWorker started. Owner={OwnerId}", _ownerId);
+            _logger.LogInformation(WorkerStarted, "DispatchWorker started. Owner={OwnerId}", _ownerId);
 
             while (!stoppingToken.IsCancellationRequested)
             {
@@ -39,14 +41,14 @@ namespace DocumentDispatchService.Background
                 catch (Exception ex)
                 {
                     DispatchMetrics.DispatchErrorsTotal.WithLabels("tick").Inc();
-                    _logger.LogError(ex, "Unhandled error in DispatchWorker loop.");
+                    _logger.LogError(WorkerLoopError, ex, "Unhandled error in DispatchWorker loop.");
                 }
 
                 var pollSeconds = GetInt("DispatchWorker:PollSeconds", 5);
                 await Task.Delay(TimeSpan.FromSeconds(pollSeconds), stoppingToken);
             }
 
-            _logger.LogInformation("DispatchWorker stopping. Owner={OwnerId}", _ownerId);
+            _logger.LogInformation(WorkerStopping, "DispatchWorker stopping. Owner={OwnerId}", _ownerId);
         }
 
         private async Task TickAsync(CancellationToken ct)
@@ -95,7 +97,7 @@ namespace DocumentDispatchService.Background
                 {
                     claimed.Add(id);
                     DispatchMetrics.DispatchClaimedTotal.Inc();
-                    _logger.LogInformation("CLAIMED dispatch {DispatchId} by {OwnerId}", id, _ownerId);
+                    _logger.LogInformation(DispatchClaimed, "Claimed dispatch {DispatchId} by {OwnerId}", id, _ownerId);
                 }
             }
 
@@ -105,7 +107,8 @@ namespace DocumentDispatchService.Background
             }
 
             _logger.LogInformation(
-                "Claimed {Count} dispatch(es). Owner={OwnerId}. MaxConcurrency={MaxConcurrency}",
+                DispatchBatchClaimed,
+                "Batch claimed. Count={Count}  OwnerID={OwnerId} MaxConcurrency={MaxConcurrency}",
                 claimed.Count,
                 _ownerId,
                 maxConcurrency);
@@ -130,7 +133,7 @@ namespace DocumentDispatchService.Background
                     catch (Exception ex)
                     {
                         DispatchMetrics.DispatchErrorsTotal.WithLabels("process").Inc();
-                        _logger.LogError(ex, "Unhandled exception while processing dispatch {DispatchId}", id);
+                        _logger.LogError(DispatchProcessError, ex, "Unhandled exception while processing dispatch {DispatchId}", id);
                     }
                     finally
                     {
@@ -166,7 +169,7 @@ namespace DocumentDispatchService.Background
             if (dispatch is null)
             {
                 DispatchMetrics.DispatchProcessedTotal.WithLabels("lease_lost").Inc();
-                _logger.LogWarning("Lost lease for dispatch {DispatchId}. Owner={OwnerId}", dispatchId, _ownerId);
+                _logger.LogWarning(LeaseLost, "Lost lease.  DispatchId={DispatchId} OwnerId={OwnerId}", dispatchId, _ownerId);
                 return;
             }
 
@@ -179,7 +182,7 @@ namespace DocumentDispatchService.Background
             DispatchMetrics.DispatchInflight.Inc();
             using var timer = DispatchMetrics.DispatchProcessingDurationSeconds.NewTimer();
 
-            _logger.LogInformation("Processing dispatch.");
+            _logger.LogInformation(DispatchProcessingStart, "Processing dispatch.");
 
             using var renewCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
@@ -250,6 +253,7 @@ namespace DocumentDispatchService.Background
                 await db.SaveChangesAsync(ct);
 
                 _logger.LogInformation(
+                    DispatchUpdated,
                     "Dispatch updated. Status={Status}, RetryCount={RetryCount}",
                     dispatch.Status,
                     dispatch.RetryCount);
@@ -292,12 +296,12 @@ namespace DocumentDispatchService.Background
                 if (!ok)
                 {
                     DispatchMetrics.DispatchErrorsTotal.WithLabels("renew").Inc();
-                    _logger.LogWarning("Lease renewal failed (lost lease).");
+                    _logger.LogWarning(LeaseLost, "Lease renewal failed (lost lease).");
                     return false;
                 }
 
                 DispatchMetrics.DispatchLeaseRenewedTotal.Inc();
-                _logger.LogDebug("Lease renewed.");
+                _logger.LogDebug(LeaseRenewed, "Lease renewed.");
             }
 
             return true;
