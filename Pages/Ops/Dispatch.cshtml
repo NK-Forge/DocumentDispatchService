@@ -1,0 +1,106 @@
+﻿@page "/ops/dispatch/{id:guid}"
+@model DocumentDispatchService.Pages.Ops.DispatchModel
+@{
+    ViewData["Title"] = "Dispatch Details";
+}
+
+<div class="d-flex align-items-center justify-content-between mb-3">
+    <div>
+        <h2 class="mb-1">Dispatch Details</h2>
+        <div class="muted"><code>@Model.Id</code></div>
+    </div>
+    <div class="d-flex gap-2">
+        <a class="btn btn-sm btn-outline-secondary" href="/ops">Back to Ops</a>
+    </div>
+</div>
+
+@if (TempData["OpsMessage"] is string msg && !string.IsNullOrWhiteSpace(msg))
+{
+    <div class="alert alert-info">@msg</div>
+}
+
+@if (Model.Dispatch is null)
+{
+    <div class="alert alert-danger">
+        Dispatch not found.
+    </div>
+}
+else
+{
+    <div class="row g-3 mb-3">
+        <div class="col-12 col-lg-6">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="mb-3">Core</h5>
+
+                    <div class="mb-2"><span class="muted">Status:</span> <strong>@Model.Dispatch.Status</strong></div>
+                    <div class="mb-2"><span class="muted">Recipient:</span> <code>@Model.Dispatch.RecipientEmail</code></div>
+                    <div class="mb-2"><span class="muted">Document:</span> <code>@Model.Dispatch.DocumentName</code></div>
+                    <div class="mb-2"><span class="muted">Retries:</span> <strong>@Model.Dispatch.RetryCount</strong></div>
+
+                    <hr />
+
+                    <div class="mb-2"><span class="muted">Created:</span> <strong>@Model.Dispatch.CreatedAtUtc.ToString("u")</strong></div>
+                    <div class="mb-2"><span class="muted">Updated:</span> <strong>@Model.Dispatch.UpdatedAtUtc.ToString("u")</strong></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-12 col-lg-6">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="mb-3">Lease / Lock</h5>
+
+                    <div class="mb-2"><span class="muted">Lock Owner:</span> <strong>@(Model.Dispatch.LockOwner ?? "—")</strong></div>
+                    <div class="mb-2"><span class="muted">Locked Until:</span> <strong>@(Model.Dispatch.LockedUntilUtc?.ToString("u") ?? "—")</strong></div>
+
+                    <hr />
+
+                    <h5 class="mb-3">Last Error</h5>
+
+                    @if (string.IsNullOrWhiteSpace(Model.Dispatch.LastError))
+                    {
+                        <div class="muted">—</div>
+                    }
+                    else
+                    {
+                        <pre class="mb-0"><code>@Model.Dispatch.LastError</code></pre>
+                    }
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-body">
+            <h5 class="mb-3">Ops Actions</h5>
+
+            <div class="d-flex flex-wrap gap-2">
+                <form method="post" asp-page-handler="Requeue" asp-route-id="@Model.Id">
+                    <button type="submit" class="btn btn-outline-info btn-sm">Requeue (Pending)</button>
+                </form>
+
+                <form method="post" asp-page-handler="ReleaseLock" asp-route-id="@Model.Id">
+                    <button type="submit" class="btn btn-outline-warning btn-sm">Release Lock</button>
+                </form>
+
+                <form method="post" asp-page-handler="ClearError" asp-route-id="@Model.Id">
+                    <button type="submit" class="btn btn-outline-secondary btn-sm">Clear Error</button>
+                </form>
+
+                <form method="post" asp-page-handler="ResetRetries" asp-route-id="@Model.Id">
+                    <button type="submit" class="btn btn-outline-secondary btn-sm">Reset Retries</button>
+                </form>
+            </div>
+
+            <div class="mt-3 muted">
+                Notes:
+                <ul class="mb-0">
+                    <li>Requeue sets Status=Pending and clears lock fields.</li>
+                    <li>Release Lock clears lock fields without changing Status.</li>
+                    <li>Reset Retries sets RetryCount=0.</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+}

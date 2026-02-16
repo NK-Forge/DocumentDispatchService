@@ -1,0 +1,319 @@
+﻿@page "/ops"
+@model DocumentDispatchService.Pages.Ops.IndexModel
+@{
+    ViewData["Title"] = "Operations Dashboard";
+}
+
+<div class="d-flex align-items-center justify-content-between mb-4">
+    <div>
+        <h2 class="mb-1">Operations Dashboard</h2>
+        <div class="muted">Live dispatch visibility & control</div>
+    </div>
+
+    <div class="d-flex align-items-center gap-4 ms-auto">
+        <div class="form-check form-switch mb-0">
+            <input class="form-check-input" type="checkbox" id="showCompleted">
+            <label class="form-check-label" for="showCompleted">Show Completed</label>
+        </div>
+
+        <div class="form-check form-switch mb-0">
+            <input class="form-check-input" type="checkbox" id="autoRefresh" checked>
+            <label class="form-check-label" for="autoRefresh">Auto-refresh</label>
+        </div>
+
+        <div class="muted text-end" style="min-width:170px;">
+            Next refresh in <strong id="countdown">10</strong>s
+        </div>
+    </div>
+</div>
+
+@if (TempData["OpsMessage"] is string msg && !string.IsNullOrWhiteSpace(msg))
+{
+    <div class="alert alert-info py-2 mb-4">@msg</div>
+}
+
+<div class="row g-3 mb-4" id="snapshot-cards"></div>
+
+<div class="card mb-4">
+    <div class="card-body">
+        <div class="d-flex align-items-center justify-content-between mb-3">
+            <div>
+                <h5 class="mb-1">Demonstration Buttons</h5>
+                <div class="muted">Generate or clear jobs to showcase lifecycle behavior.</div>
+            </div>
+            <span class="badge badge-soft">Demo</span>
+        </div>
+
+        <div class="d-flex flex-wrap gap-3 align-items-end">
+            <form method="post" asp-page-handler="CreateDemo" class="d-flex gap-2 align-items-end">
+                <div>
+                    <label class="form-label mb-1 muted">Jobs</label>
+                    <select class="form-select form-select-sm" name="count" style="width:120px;">
+                        @for (var i = 1; i <= 50; i++)
+                        {
+                            <option value="@i">@i</option>
+                        }
+                    </select>
+                </div>
+
+                <div>
+                    <label class="form-label mb-1 muted">Mode</label>
+                    <select class="form-select form-select-sm" name="mode" style="width:240px;">
+                        <option value="live" selected>Live Flow (Worker Driven)</option>
+                        <option value="pending">All Pending (Bulk)</option>
+                        <option value="mixed">Mixed (Static UI)</option>
+                        <option value="failed">All Failed</option>
+                    </select>
+                </div>
+
+                <button type="submit" class="btn btn-sm btn-outline-info">
+                    Create Jobs
+                </button>
+            </form>
+
+            <form method="post" asp-page-handler="ClearDemo" class="d-flex gap-2 align-items-end">
+                <div>
+                    <label class="form-label mb-1 muted">Confirm</label>
+                    <input class="form-control form-control-sm" name="confirm" placeholder="Type CLEAR" style="width:140px;" />
+                </div>
+
+                <button type="submit" class="btn btn-sm btn-outline-danger">
+                    Clear Jobs
+                </button>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3">
+    <div class="col-12 col-lg-8">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex align-items-center justify-content-between mb-3">
+                    <div class="d-flex align-items-center gap-3">
+                        <h5 class="mb-0">Recent Dispatches</h5>
+
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="muted">Rows</span>
+                            <select id="rowCount" class="form-select form-select-sm" style="width:110px;">
+                                <option value="15" selected>15</option>
+                                <option value="25">25</option>
+                                <option value="50">50</option>
+                                <option value="100">100</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <span class="badge badge-soft" id="last-refresh">—</span>
+                </div>
+
+                <div id="recent-table"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-12 col-lg-4">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex align-items-center justify-content-between mb-3">
+                    <h5 class="mb-0">Activity</h5>
+                    <span class="badge badge-soft" id="activity-refresh">—</span>
+                </div>
+
+                <div class="table-responsive" style="max-height: 460px; overflow-y: auto;">
+                    <table class="table table-sm align-middle mb-0">
+                        <thead>
+                            <tr>
+                                <th style="width: 110px;">Time</th>
+                                <th style="width: 90px;">Source</th>
+                                <th>Message</th>
+                            </tr>
+                        </thead>
+                        <tbody id="activity-body">
+                            <tr><td colspan="3" class="muted">—</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="muted mt-2" style="font-size:.85rem;">
+                    Shows recent ops + worker actions.
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+@section Scripts {
+    <script>
+        const refreshSeconds = 10;
+        let remaining = refreshSeconds;
+
+        let showCompleted = false;
+        let rowCount = 15;
+
+        document.addEventListener("DOMContentLoaded", () => {
+            const sc = document.getElementById("showCompleted");
+            if (sc) {
+                sc.addEventListener("change", (e) => {
+                    showCompleted = e.target.checked;
+                    refreshAll();
+                });
+            }
+
+            const rc = document.getElementById("rowCount");
+            if (rc) {
+                rc.addEventListener("change", (e) => {
+                    rowCount = parseInt(e.target.value, 10) || 15;
+                    refreshAll();
+                });
+            }
+        });
+
+        function fmtUtc(iso) {
+            if (!iso) return '—';
+            const d = new Date(iso);
+            return d.toISOString().replace('T',' ').replace('Z',' UTC');
+        }
+
+        function fmtLocalTime(iso) {
+            if (!iso) return '—';
+            const d = new Date(iso);
+            return d.toLocaleTimeString();
+        }
+
+        function statusBadge(status) {
+            const map = {
+                Pending: 'secondary',
+                Processing: 'info',
+                Completed: 'success',
+                Failed: 'danger'
+            };
+
+            const cls = map[status] || 'secondary';
+            return `<span class="badge text-bg-${cls}">${status}</span>`;
+        }
+
+        async function loadSnapshot() {
+            const res = await fetch('/ops?handler=Snapshot', { cache: 'no-store' });
+            if (!res.ok) return;
+
+            const s = await res.json();
+
+            const cards = [
+                { label: 'Total', value: s.total },
+                { label: 'Pending', value: s.pending },
+                { label: 'Processing', value: s.processing },
+                { label: 'Completed', value: s.completed },
+                { label: 'Failed', value: s.failed },
+                { label: 'Locked', value: s.locked },
+                { label: 'Stale Processing', value: s.staleProcessing }
+            ];
+
+            document.getElementById('snapshot-cards').innerHTML = cards.map(c => `
+                <div class="col-6 col-md-3">
+                    <div class="card">
+                        <div class="card-body">
+                            <div class="muted">${c.label}</div>
+                            <div class="fs-3 fw-semibold">${c.value}</div>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        async function loadRecent() {
+            const res = await fetch(`/ops?handler=Recent&take=${rowCount}&showCompleted=${showCompleted}`, { cache: 'no-store' });
+            if (!res.ok) return;
+
+            const rows = await res.json();
+
+            const table = `
+                <div class="table-responsive" style="max-height: 460px; overflow-y: auto;">
+                    <table class="table table-sm table-hover align-middle mb-0">
+                        <thead>
+                            <tr>
+                                <th>Status</th>
+                                <th>Document</th>
+                                <th>Recipient</th>
+                                <th>Retries</th>
+                                <th>Updated</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${rows.map(r => {
+                                const updated = r.updatedAtUtc ? new Date(r.updatedAtUtc) : null;
+                                const isStaleProcessing =
+                                    (r.status === 'Processing') &&
+                                    updated &&
+                                    ((Date.now() - updated.getTime()) > 10 * 60 * 1000);
+
+                                const rowClass =
+                                    r.hasError ? 'row-bad' :
+                                    (isStaleProcessing ? 'row-warn' : '');
+
+                                return `
+                                    <tr class="${rowClass}">
+                                        <td>${statusBadge(r.status)}</td>
+                                        <td><code>${(r.documentName || '').substring(0, 40)}</code></td>
+                                        <td>${(r.recipientEmail || '').substring(0, 40)}</td>
+                                        <td>${r.retryCount}</td>
+                                        <td class="muted">${fmtUtc(r.updatedAtUtc)}</td>
+                                        <td class="text-end">
+                                            <a class="btn btn-sm btn-outline-info" href="/ops/dispatch/${r.id}">Details</a>
+                                        </td>
+                                    </tr>
+                                `;
+                            }).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+
+            document.getElementById('recent-table').innerHTML = table;
+            document.getElementById('last-refresh').textContent =
+                `Refreshed: ${new Date().toLocaleTimeString()}`;
+        }
+
+        async function loadActivity() {
+            const res = await fetch('/ops?handler=Activity&take=30', { cache: 'no-store' });
+            if (!res.ok) return;
+
+            const events = await res.json();
+
+            const body = events.length
+                ? events.map(e => `
+                    <tr>
+                        <td class="muted">${fmtLocalTime(e.atUtc)}</td>
+                        <td><span class="badge badge-soft">${e.source}</span></td>
+                        <td>${e.message}</td>
+                    </tr>
+                  `).join('')
+                : `<tr><td colspan="3" class="muted">—</td></tr>`;
+
+            document.getElementById('activity-body').innerHTML = body;
+            document.getElementById('activity-refresh').textContent =
+                `Updated: ${new Date().toLocaleTimeString()}`;
+        }
+
+        async function refreshAll() {
+            await Promise.all([loadSnapshot(), loadRecent(), loadActivity()]);
+        }
+
+        function tick() {
+            if (!document.getElementById('autoRefresh').checked) return;
+
+            remaining--;
+            if (remaining <= 0) {
+                remaining = refreshSeconds;
+                refreshAll();
+            }
+
+            document.getElementById('countdown').textContent = remaining;
+        }
+
+        document.getElementById('countdown').textContent = remaining;
+        refreshAll();
+        setInterval(tick, 1000);
+    </script>
+}

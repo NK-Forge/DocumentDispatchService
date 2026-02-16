@@ -9,6 +9,10 @@ var builder = WebApplication.CreateBuilder(args);
 // Controllers
 builder.Services.AddControllers();
 
+// Razor Pages (Ops UI)
+builder.Services.AddRazorPages();
+builder.Services.AddSingleton<DocumentDispatchService.Services.OpsActivityLog>();
+
 // Swagger
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
@@ -36,6 +40,9 @@ if (app.Environment.IsDevelopment())
 app.UseHttpMetrics();
 
 app.MapControllers();
+
+// Ops UI
+app.MapRazorPages();
 
 // Prometheus scrape endpoint
 app.MapMetrics("/metrics");
