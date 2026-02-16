@@ -108,7 +108,7 @@ namespace DocumentDispatchService.Background
 
             _logger.LogInformation(
                 DispatchBatchClaimed,
-                "Batch claimed. Count={Count}  OwnerID={OwnerId} MaxConcurrency={MaxConcurrency}",
+                "Batch claimed. Count={Count}  OwnerId={OwnerId} MaxConcurrency={MaxConcurrency}",
                 claimed.Count,
                 _ownerId,
                 maxConcurrency);
@@ -182,7 +182,7 @@ namespace DocumentDispatchService.Background
             DispatchMetrics.DispatchInflight.Inc();
             using var timer = DispatchMetrics.DispatchProcessingDurationSeconds.NewTimer();
 
-            _logger.LogInformation(DispatchProcessingStart, "Processing dispatch.");
+            _logger.LogInformation(DispatchProcessingStart, "Processing started.");
 
             using var renewCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
