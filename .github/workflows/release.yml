@@ -67,3 +67,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.ZIP_NAME }}
+          body_path: release/README.md
