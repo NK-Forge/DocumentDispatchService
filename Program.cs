@@ -30,6 +30,14 @@ builder.Services.AddHostedService<DispatchWorker>();
 
 var app = builder.Build();
 
+// Apply EF Core Migrations automatically on startup.
+// This makes first-run Docker an dfresh environments work without manual steps.
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<DispatchDbContext>();
+    db.Database.Migrate();
+}
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
