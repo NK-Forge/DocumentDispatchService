@@ -4,7 +4,7 @@ using DocumentDispatchService.Observability;
 using DocumentDispatchService.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
-using static DocumentDispatchService.Observability.DispactchLogEvents;
+using static DocumentDispatchService.Observability.DispatchLogEvents;
 using Prometheus;
 
 namespace DocumentDispatchService.Background
