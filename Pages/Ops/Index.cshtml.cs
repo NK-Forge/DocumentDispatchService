@@ -25,22 +25,34 @@ namespace DocumentDispatchService.Pages.Ops
         public async Task<IActionResult> OnGetSnapshotAsync()
         {
             var now = DateTime.UtcNow;
-            var staleThreshold = now.AddMinutes(-10);
+            var staleThreshold = now.AddMinutes(-5);
 
-            var snapshot = new
+            var snapshot = await _db.DispatchRequests
+                .GroupBy(_ => 1)
+                .Select(g => new
+                {
+                    total = g.Count(),
+                    pending = g.Count(d => d.Status == DispatchStatus.Pending),
+                    processing = g.Count(d => d.Status == DispatchStatus.Processing),
+                    completed = g.Count(d => d.Status == DispatchStatus.Completed),
+                    failed = g.Count(d => d.Status == DispatchStatus.Failed),
+                    locked = g.Count(d => d.LockedUntilUtc != null && d.LockedUntilUtc > now),
+                    staleProcessing = g.Count(d =>
+                        d.Status == DispatchStatus.Processing &&
+                        d.UpdatedAtUtc < staleThreshold)
+                })
+                .SingleOrDefaultAsync();
+
+            return new JsonResult(snapshot ?? new
             {
-                total = await _db.DispatchRequests.CountAsync(),
-                pending = await _db.DispatchRequests.CountAsync(d => d.Status == DispatchStatus.Pending),
-                processing = await _db.DispatchRequests.CountAsync(d => d.Status == DispatchStatus.Processing),
-                completed = await _db.DispatchRequests.CountAsync(d => d.Status == DispatchStatus.Completed),
-                failed = await _db.DispatchRequests.CountAsync(d => d.Status == DispatchStatus.Failed),
-                locked = await _db.DispatchRequests.CountAsync(d => d.LockedUntilUtc != null && d.LockedUntilUtc > now),
-                staleProcessing = await _db.DispatchRequests.CountAsync(d =>
-                    d.Status == DispatchStatus.Processing &&
-                    d.UpdatedAtUtc < staleThreshold)
-            };
-
-            return new JsonResult(snapshot);
+                total = 0,
+                pending = 0,
+                processing = 0,
+                completed = 0,
+                failed = 0,
+                locked = 0,
+                staleProcessing = 0
+            });
         }
 
         public async Task<IActionResult> OnGetRecentAsync(int take = 15, bool showCompleted = false)
@@ -175,9 +187,7 @@ namespace DocumentDispatchService.Pages.Ops
                 return Redirect("/ops");
             }
 
-            var all = await _db.DispatchRequests.ToListAsync();
-            _db.DispatchRequests.RemoveRange(all);
-            await _db.SaveChangesAsync();
+            await _db.DispatchRequests.ExecuteDeleteAsync();
 
             _activity.Add("OPS", "Cleared all jobs.");
 
