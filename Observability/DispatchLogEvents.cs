@@ -1,6 +1,6 @@
 ﻿namespace DocumentDispatchService.Observability
 {
-    public static class DispactchLogEvents
+    public static class DispatchLogEvents
     {
         public static readonly EventId WorkerStarted = new(5100, nameof(WorkerStarted));
         public static readonly EventId WorkerStopping = new(5101, nameof(WorkerStopping));

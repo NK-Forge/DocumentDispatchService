@@ -1,8 +1,8 @@
-version: "3.9"
-
 services:
   api:
-    build: .
+    build:
+      context: ..
+      dockerfile: Dockerfile
     container_name: document_dispatch_api
     depends_on:
       - postgres
@@ -21,9 +21,20 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+
+  prometheus:
+    image: prom/prometheus
+    container_name: document_dispatch_prometheus
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
 
 volumes:
   postgres_data:
