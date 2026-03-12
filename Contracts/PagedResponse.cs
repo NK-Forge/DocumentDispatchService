@@ -2,9 +2,10 @@
 {
     public sealed class PagedResponse<T>
     {
-        public int Skip { get; set; }
-        public int Take { get; set; }
-        public int Count { get; set; }
-        public List<T> Items { get; set; } = [];
+        public required int Skip { get; init; }
+        public required int Take { get; init; }
+        public required int Count { get; init; }
+        public required int Total { get; init; }
+        public required IReadOnlyList<T> Items { get; init; }
     }
 }

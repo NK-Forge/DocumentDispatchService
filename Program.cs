@@ -6,9 +6,6 @@ using Prometheus;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Controllers
-builder.Services.AddControllers();
-
 // Razor Pages (Ops UI)
 builder.Services.AddRazorPages();
 builder.Services.AddSingleton<DocumentDispatchService.Services.OpsActivityLog>();
@@ -16,6 +13,7 @@ builder.Services.AddSingleton<DocumentDispatchService.Services.OpsActivityLog>()
 // Swagger
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+
 
 builder.Services.AddDbContext<DispatchDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
@@ -28,21 +26,23 @@ builder.Services
 
 builder.Services.AddHostedService<DispatchWorker>();
 
+builder.Services.Configure<DispatchWorkerOptions>(
+    builder.Configuration.GetSection("DispatchWorker"));
+
 var app = builder.Build();
 
-// Apply EF Core Migrations automatically on startup.
-// This makes first-run Docker an dfresh environments work without manual steps.
-using (var scope = app.Services.CreateScope())
+var migrateOnStartup = builder.Configuration.GetValue<bool>("Database:MigrateOnStartup");
+
+if (migrateOnStartup)
 {
+    await using var scope = app.Services.CreateAsyncScope();
     var db = scope.ServiceProvider.GetRequiredService<DispatchDbContext>();
-    db.Database.Migrate();
+    await db.Database.MigrateAsync();
 }
 
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
+// Swagger
+app.UseSwagger();
+app.UseSwaggerUI();
 
 // Prometheus: basic request metrics (HTTP count + duration)
 app.UseHttpMetrics();
