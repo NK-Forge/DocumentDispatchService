@@ -131,6 +131,9 @@ Includes:
 - Lease renewal counts
 - Worker error counts
 
+Note: `/metrics` is intentionally exposed in the local/demo environment so observability can be reviewed easily.
+In a production deployment, this endpoint should typically be restricted at the proxy or network layer.
+
 ---
 
 ## Demo Controls

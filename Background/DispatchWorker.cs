@@ -3,7 +3,7 @@ using DocumentDispatchService.Models;
 using DocumentDispatchService.Observability;
 using DocumentDispatchService.Services;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using static DocumentDispatchService.Observability.DispatchLogEvents;
 using Prometheus;
 
@@ -13,7 +13,7 @@ namespace DocumentDispatchService.Background
     {
         private readonly IServiceScopeFactory _scopeFactory;
         private readonly ILogger<DispatchWorker> _logger;
-        private readonly IConfiguration _config;
+        private readonly DispatchWorkerOptions _opts;
         private readonly OpsActivityLog _activity;
 
         private readonly Random _random = new();
@@ -22,12 +22,12 @@ namespace DocumentDispatchService.Background
         public DispatchWorker(
             IServiceScopeFactory scopeFactory,
             ILogger<DispatchWorker> logger,
-            IConfiguration config,
+            IOptions<DispatchWorkerOptions> options,
             OpsActivityLog activity)
         {
             _scopeFactory = scopeFactory;
             _logger = logger;
-            _config = config;
+            _opts = options.Value;
             _activity = activity;
         }
 
@@ -62,27 +62,25 @@ namespace DocumentDispatchService.Background
 
         private async Task DelayBetweenPollsAsync(CancellationToken ct)
         {
-            // Preferred: PollDelayMs (gives smooth live flow)
-            var pollDelayMs = GetInt("DispatchWorker:PollDelayMs", 0);
+            var pollDelayMs = _opts.PollDelayMs;
+
             if (pollDelayMs > 0)
             {
-                if (pollDelayMs < 100) pollDelayMs = 100;
+                if (pollDelayMs < 100)
+                    pollDelayMs = 100;
+
                 await Task.Delay(pollDelayMs, ct);
                 return;
             }
 
-            // Back-compat: PollSeconds
-            var pollSeconds = GetInt("DispatchWorker:PollSeconds", 5);
-            if (pollSeconds < 1) pollSeconds = 1;
-
-            await Task.Delay(TimeSpan.FromSeconds(pollSeconds), ct);
+            await Task.Delay(TimeSpan.FromSeconds(1), ct);
         }
 
         private async Task TickAsync(CancellationToken ct)
         {
-            var batchSize = GetInt("DispatchWorker:BatchSize", 5);
-            var leaseSeconds = GetInt("DispatchWorker:LeaseSeconds", 30);
-            var maxConcurrency = Math.Max(1, GetInt("DispatchWorker:MaxConcurrency", 2));
+            var batchSize = _opts.BatchSize;
+            var leaseSeconds = _opts.LeaseSeconds;
+            var maxConcurrency = Math.Max(1, _opts.MaxConcurrency);
 
             using var scope = _scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<DispatchDbContext>();
@@ -179,14 +177,12 @@ namespace DocumentDispatchService.Background
         private async Task ProcessOneAsync(Guid dispatchId, CancellationToken ct)
         {
             // Preferred: WorkDelayMs (smooth demo pacing)
-            var workDelayMs = GetInt("DispatchWorker:WorkDelayMs", 0);
+            var workDelayMs = _opts.WorkDelayMs;
 
-            // Back-compat: WorkSeconds
-            var workSeconds = GetInt("DispatchWorker:WorkSeconds", 2);
-            var leaseSeconds = GetInt("DispatchWorker:LeaseSeconds", 30);
+            // WorkSeconds: used as fallback delay when WorkDelayMs is 0
+            var leaseSeconds = _opts.LeaseSeconds;
 
-            var defaultRenew = Math.Max(1, leaseSeconds / 3);
-            var renewEverySeconds = Math.Max(1, GetInt("DispatchWorker:LeaseRenewEverySeconds", defaultRenew));
+            var renewEverySeconds = Math.Max(1, _opts.LeaseRenewEverySeconds);
 
             using var scope = _scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<DispatchDbContext>();
@@ -246,7 +242,7 @@ namespace DocumentDispatchService.Background
                 }
                 else
                 {
-                    var total = TimeSpan.FromSeconds(workSeconds);
+                    var total = TimeSpan.FromSeconds(_opts.WorkSeconds);
                     var chunk = TimeSpan.FromSeconds(1);
 
                     var elapsed = TimeSpan.Zero;
@@ -286,10 +282,10 @@ namespace DocumentDispatchService.Background
                 {
                     dispatch.RetryCount++;
 
-                    if (dispatch.RetryCount >= 3)
+                    if (dispatch.RetryCount >= _opts.MaxRetries)
                     {
                         dispatch.Status = DispatchStatus.Failed;
-                        dispatch.LastError = "Simulated delivery failure after 3 attempts.";
+                        dispatch.LastError = $"Simulated delivery failure after {_opts.MaxRetries} attempts.";
                         DispatchMetrics.DispatchProcessedTotal.WithLabels("failed").Inc();
 
                         _activity.Add("WORKER", $"FAILED {dispatchId} (RetryCount={dispatch.RetryCount})");
@@ -326,9 +322,9 @@ namespace DocumentDispatchService.Background
                 {
                     await renewTask;
                 }
-                catch
+                catch (Exception ex) 
                 {
-                    // ignore
+                    _logger.LogDebug(ex, "Lease renewal task ended with a suppressed exception for dispatch {DispatchId}", dispatchId);
                 }
             }
         }
@@ -383,12 +379,6 @@ namespace DocumentDispatchService.Background
                     ct);
 
             return rows == 1;
-        }
-
-        private int GetInt(string key, int defaultValue)
-        {
-            var value = _config[key];
-            return int.TryParse(value, out var result) ? result : defaultValue;
         }
     }
 }
