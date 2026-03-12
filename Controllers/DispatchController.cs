@@ -96,8 +96,12 @@ namespace DocumentDispatchService.Controllers
 
             _logger.LogInformation("List dispatch requests. Skip={Skip}, Take={Take}", skip, take);
 
-            var items = await _db.DispatchRequests
-                .OrderByDescending(x => x.CreatedAtUtc)
+            var query = _db.DispatchRequests
+                .OrderByDescending(x => x.CreatedAtUtc);
+
+            var total = await _db.DispatchRequests.CountAsync(ct);
+
+            var items = await query
                 .Skip(skip)
                 .Take(take)
                 .ToListAsync(ct);
@@ -111,6 +115,7 @@ namespace DocumentDispatchService.Controllers
                 Skip = skip,
                 Take = take,
                 Count = mapped.Count,
+                Total = total,
                 Items = mapped
             });
         }
